@@ -91,6 +91,7 @@ func TestTriggerRebuilds(t *testing.T) {
 		{ImageName: "frontend", Workspace: "frontend-workspace"},
 		{ImageName: "backend", Workspace: "backend-workspace"},
 		{ImageName: "backend-api", Workspace: "backend-workspace"},
+		{ImageName: "foobar.com/org/repo", Workspace: "backend-workspace"},
 	}
 
 	for _, a := range artifacts {
@@ -141,6 +142,12 @@ func TestTriggerRebuilds(t *testing.T) {
 			name:        "invalid pattern",
 			pattern:     "[invalid",
 			expectError: true,
+		},
+		{
+			name:          "url pattern",
+			pattern:       "foobar.com/*",
+			expectedCount: 1,
+			expectError:   false,
 		},
 	}
 

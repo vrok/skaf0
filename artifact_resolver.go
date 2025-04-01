@@ -13,6 +13,7 @@ import (
 
 	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
 	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/gobwas/glob"
 	"github.com/rjeczalik/notify"
 )
 
@@ -77,15 +78,14 @@ func (r *ArtifactResolver) TriggerRebuilds(pattern string) error {
 	}
 
 	var matchedArtifacts []string
-	for _, artifactName := range artifacts {
-		for _, p := range patterns {
-			matched, err := filepath.Match(p, artifactName)
-			if err != nil {
-				return fmt.Errorf("invalid pattern %q: %w", p, err)
-			}
-			if matched {
+	for _, p := range patterns {
+		gp, err := glob.Compile(p)
+		if err != nil {
+			return fmt.Errorf("invalid pattern %q: %w", p, err)
+		}
+		for _, artifactName := range artifacts {
+			if gp.Match(artifactName) {
 				matchedArtifacts = append(matchedArtifacts, artifactName)
-				break
 			}
 		}
 	}
