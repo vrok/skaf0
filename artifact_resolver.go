@@ -1,0 +1,147 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"maps"
+	"math/rand"
+	"os"
+	"path/filepath"
+	"slices"
+	"sync"
+
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/rjeczalik/notify"
+)
+
+type artifact struct {
+	imageName   string
+	workspace   string
+	triggerFile string
+}
+
+type ArtifactResolver struct {
+	mtx     sync.Mutex
+	files   map[string]*artifact
+	watches map[string]chan<- notify.EventInfo
+}
+
+func NewArtifactResolver() *ArtifactResolver {
+	return &ArtifactResolver{
+		files:   make(map[string]*artifact),
+		watches: make(map[string]chan<- notify.EventInfo),
+	}
+}
+
+func (r *ArtifactResolver) AddWatch(path string, c chan<- notify.EventInfo, events ...notify.Event) error {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+
+	r.watches[path] = c
+	return nil
+}
+
+type fakeEventInfo struct {
+	path string
+}
+
+func (f fakeEventInfo) Event() notify.Event {
+	return notify.Write
+}
+
+func (f fakeEventInfo) Path() string {
+	return f.path
+}
+
+func (f fakeEventInfo) Sys() interface{} {
+	return nil
+}
+
+func (r *ArtifactResolver) TriggerRebuild(artifactName string) error {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+
+	art, ok := r.files[artifactName]
+	if !ok {
+		return fmt.Errorf("artifact not found: %s", artifactName)
+	}
+
+	// Construct the absolute path with "..." suffix for watching
+	wd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	var watchPath string
+	if filepath.IsAbs(art.workspace) {
+		watchPath = filepath.Join(art.workspace, "...")
+	} else {
+		watchPath = filepath.Join(wd, art.workspace, "...")
+	}
+
+	watch, ok := r.watches[watchPath]
+	if !ok {
+		return fmt.Errorf("watch not found for artifact: %s (watch path: %s)", artifactName, watchPath)
+	}
+
+	// Write a random byte to trigger file to simulate a change
+	if err := os.WriteFile(art.triggerFile, []byte{byte(rand.Intn(256))}, 0644); err != nil {
+		return fmt.Errorf("failed to write to trigger file: %w", err)
+	}
+
+	watch <- &fakeEventInfo{path: art.triggerFile}
+
+	return nil
+}
+
+func (r *ArtifactResolver) GetDependencies(ctx context.Context, a *latest.Artifact, cfg docker.Config, tag string) ([]string, error) {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+
+	art, ok := r.files[a.ImageName]
+
+	if !ok {
+		f, err := os.CreateTemp("", "skaf0-*")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create temp file: %w", err)
+		}
+		defer f.Close()
+
+		fileName := f.Name()
+
+		art = &artifact{
+			imageName:   a.ImageName,
+			workspace:   a.Workspace,
+			triggerFile: fileName,
+		}
+		r.files[a.ImageName] = art
+	}
+
+	return []string{art.triggerFile}, nil
+}
+
+func (r *ArtifactResolver) GetArtifactTriggerFiles() map[string]string {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+
+	result := make(map[string]string, len(r.files))
+	for k, v := range r.files {
+		result[k] = v.triggerFile
+	}
+	return result
+}
+
+func (r *ArtifactResolver) GetWatches() []string {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+
+	return slices.Collect(maps.Keys(r.watches))
+}
+
+func (r *ArtifactResolver) GetArtifacts() []string {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+
+	return slices.Collect(maps.Keys(r.files))
+}
