@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -17,6 +16,7 @@ import (
 	"github.com/GoogleContainerTools/skaffold/v2/cmd/skaffold/app"
 	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
 	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/manifoldco/promptui"
 	"github.com/rjeczalik/notify"
 )
 
@@ -62,63 +62,89 @@ func ctrl(args []string) error {
 
 	switch command {
 	case "list":
-		return makeRequest(baseURL+"/artifacts", "Error listing artifacts")
-	case "rebuild":
-		if len(args) < 2 {
-			fmt.Println("Usage: skaf0 ctrl rebuild <artifact1> [<artifact2> ...]")
-			return fmt.Errorf("missing artifact name")
-		}
-
-		// Join all artifact names with commas
-		artifacts := strings.Join(args[1:], ",")
-
-		// URL encode the artifacts string to handle special characters
-		encodedArtifacts := url.QueryEscape(artifacts)
-
-		resp, err := http.Get(baseURL + "/rebuild/" + encodedArtifacts)
+		artifacts, err := fetchArtifacts(baseURL)
 		if err != nil {
-			return fmt.Errorf("error triggering rebuild: %w", err)
+			return fmt.Errorf("error listing artifacts: %w", err)
 		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("error reading response: %w", err)
-			}
-			return fmt.Errorf("error response from skaf0: %s - %s", resp.Status, body)
+		for _, artifact := range artifacts {
+			fmt.Println(artifact)
 		}
-
-		fmt.Printf("Rebuild triggered for artifacts: %s\n", artifacts)
 		return nil
+	case "rebuild":
+		return rebuildArtifacts(args[1:], baseURL)
 	default:
 		return fmt.Errorf("unknown command: %s", command)
 	}
 }
 
-func makeRequest(url, errorMsg string) error {
-	resp, err := http.Get(url)
+func selectArtifact(baseURL string) (string, error) {
+	artifacts, err := fetchArtifacts(baseURL)
 	if err != nil {
-		return fmt.Errorf("%s: %w", errorMsg, err)
+		return "", fmt.Errorf("error listing artifacts: %w", err)
+	}
+
+	prompt := promptui.Select{
+		Label: "Select artifact to rebuild",
+		Items: artifacts,
+	}
+
+	_, result, err := prompt.Run()
+
+	if err != nil {
+		fmt.Printf("Prompt failed %v\n", err)
+		return "", fmt.Errorf("prompt failed: %w", err)
+	}
+
+	return result, nil
+}
+
+func rebuildArtifacts(args []string, baseURL string) error {
+	if len(args) < 1 {
+		artifact, err := selectArtifact(baseURL)
+		if err != nil {
+			return fmt.Errorf("error selecting artifact: %w", err)
+		}
+		args = append(args, artifact)
+	}
+
+	artifacts := strings.Join(args, ",")
+	encodedArtifacts := url.QueryEscape(artifacts)
+
+	resp, err := http.Get(baseURL + "/rebuild/" + encodedArtifacts)
+	if err != nil {
+		return fmt.Errorf("error triggering rebuild: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("error response from skaf0: %s", resp.Status)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("error reading response: %w", err)
+		}
+		return fmt.Errorf("error response from skaf0: %s - %s", resp.Status, body)
 	}
 
-	// Copy response to stdout
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("error reading response: %w", err)
-	}
-
-	var prettyJSON bytes.Buffer
-	if err := json.Indent(&prettyJSON, body, "", "  "); err != nil {
-		return fmt.Errorf("error formatting JSON: %w", err)
-	}
-	fmt.Println(prettyJSON.String())
+	fmt.Printf("Rebuild triggered for artifacts: %s\n", artifacts)
 	return nil
+}
+
+func fetchArtifacts(baseURL string) ([]string, error) {
+	resp, err := http.Get(baseURL + "/artifacts")
+	if err != nil {
+		return nil, fmt.Errorf("error fetching artifacts: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("error response from skaf0: %s", resp.Status)
+	}
+
+	var artifacts []string
+	if err := json.NewDecoder(resp.Body).Decode(&artifacts); err != nil {
+		return nil, fmt.Errorf("error decoding response: %w", err)
+	}
+
+	return artifacts, nil
 }
 
 func main() {
