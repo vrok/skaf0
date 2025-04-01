@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
@@ -22,15 +23,15 @@ type artifact struct {
 }
 
 type ArtifactResolver struct {
-	mtx     sync.Mutex
-	files   map[string]*artifact
-	watches map[string]chan<- notify.EventInfo
+	mtx       sync.Mutex
+	artifacts map[string]*artifact
+	watches   map[string]chan<- notify.EventInfo
 }
 
 func NewArtifactResolver() *ArtifactResolver {
 	return &ArtifactResolver{
-		files:   make(map[string]*artifact),
-		watches: make(map[string]chan<- notify.EventInfo),
+		artifacts: make(map[string]*artifact),
+		watches:   make(map[string]chan<- notify.EventInfo),
 	}
 }
 
@@ -58,11 +59,61 @@ func (f fakeEventInfo) Sys() interface{} {
 	return nil
 }
 
+// TriggerRebuilds triggers rebuilds for all artifacts whose names match the given pattern.
+// The pattern can be a comma-separated list of glob patterns (as defined by filepath.Match).
+// For example:
+//   - "frontend" would match only the artifact named "frontend"
+//   - "frontend,backend" would match artifacts named "frontend" and "backend"
+//   - "front*" would match artifacts with names starting with "front"
+//   - "*" would match all artifacts
+//
+// Returns an error if no artifacts match the pattern or if any rebuild fails.
+func (r *ArtifactResolver) TriggerRebuilds(pattern string) error {
+	artifacts := r.GetArtifacts()
+
+	patterns := strings.Split(pattern, ",")
+	for i := range patterns {
+		patterns[i] = strings.TrimSpace(patterns[i])
+	}
+
+	var matchedArtifacts []string
+	for _, artifactName := range artifacts {
+		for _, p := range patterns {
+			matched, err := filepath.Match(p, artifactName)
+			if err != nil {
+				return fmt.Errorf("invalid pattern %q: %w", p, err)
+			}
+			if matched {
+				matchedArtifacts = append(matchedArtifacts, artifactName)
+				break
+			}
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "\033[31mTriggering rebuilds for pattern: '%s', matched artifacts: %v\033[0m\n", pattern, matchedArtifacts)
+
+	if len(matchedArtifacts) == 0 {
+		return fmt.Errorf("no artifacts matched pattern: %s", pattern)
+	}
+
+	var errs []string
+	for _, artifactName := range matchedArtifacts {
+		if err := r.TriggerRebuild(artifactName); err != nil {
+			errs = append(errs, fmt.Sprintf("failed to trigger rebuild for %s: %v", artifactName, err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("errors triggering rebuilds: %s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
 func (r *ArtifactResolver) TriggerRebuild(artifactName string) error {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 
-	art, ok := r.files[artifactName]
+	art, ok := r.artifacts[artifactName]
 	if !ok {
 		return fmt.Errorf("artifact not found: %s", artifactName)
 	}
@@ -99,7 +150,7 @@ func (r *ArtifactResolver) GetDependencies(ctx context.Context, a *latest.Artifa
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 
-	art, ok := r.files[a.ImageName]
+	art, ok := r.artifacts[a.ImageName]
 
 	if !ok {
 		f, err := os.CreateTemp("", "skaf0-*")
@@ -115,7 +166,7 @@ func (r *ArtifactResolver) GetDependencies(ctx context.Context, a *latest.Artifa
 			workspace:   a.Workspace,
 			triggerFile: fileName,
 		}
-		r.files[a.ImageName] = art
+		r.artifacts[a.ImageName] = art
 	}
 
 	return []string{art.triggerFile}, nil
@@ -125,8 +176,8 @@ func (r *ArtifactResolver) GetArtifactTriggerFiles() map[string]string {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 
-	result := make(map[string]string, len(r.files))
-	for k, v := range r.files {
+	result := make(map[string]string, len(r.artifacts))
+	for k, v := range r.artifacts {
 		result[k] = v.triggerFile
 	}
 	return result
@@ -143,5 +194,5 @@ func (r *ArtifactResolver) GetArtifacts() []string {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 
-	return slices.Collect(maps.Keys(r.files))
+	return slices.Collect(maps.Keys(r.artifacts))
 }
