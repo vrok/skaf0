@@ -109,6 +109,23 @@ func (r *ArtifactResolver) TriggerRebuilds(pattern string) error {
 	return nil
 }
 
+func (r *ArtifactResolver) WatchPath(workspace string) (string, error) {
+	// Construct the absolute path with "..." suffix for watching
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	var watchPath string
+	if filepath.IsAbs(workspace) {
+		watchPath = filepath.Join(workspace, "...")
+	} else {
+		watchPath = filepath.Join(wd, workspace, "...")
+	}
+
+	return watchPath, nil
+}
+
 func (r *ArtifactResolver) TriggerRebuild(artifactName string) error {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
@@ -118,17 +135,9 @@ func (r *ArtifactResolver) TriggerRebuild(artifactName string) error {
 		return fmt.Errorf("artifact not found: %s", artifactName)
 	}
 
-	// Construct the absolute path with "..." suffix for watching
-	wd, err := os.Getwd()
+	watchPath, err := r.WatchPath(art.workspace)
 	if err != nil {
-		return fmt.Errorf("failed to get working directory: %w", err)
-	}
-
-	var watchPath string
-	if filepath.IsAbs(art.workspace) {
-		watchPath = filepath.Join(art.workspace, "...")
-	} else {
-		watchPath = filepath.Join(wd, art.workspace, "...")
+		return fmt.Errorf("failed to get watch path: %w", err)
 	}
 
 	watch, ok := r.watches[watchPath]
